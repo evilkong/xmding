@@ -413,7 +413,7 @@ function doPing() {
     name: '小咪叮',
     author: 'atroy',
     api: 4,
-    version: '1.0.1',
+    version: '1.0.3',
     now: Date.now(),
   };
 }

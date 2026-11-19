@@ -168,18 +168,23 @@ function validateManifest(manifest, version) {
     errs.push(`ExecutionTimeoutMs 必须在 100–120000 之间，当前 ${ms}`);
   }
 
-  // appCompatibility 规范校验
+  // ---- 代次兼容 ----
+  // 本包策略：只支持旧 4.x 体系（appEpoch 1），不支持正式代 1.x。
+  // 单代包用整数 appEpoch 简写，不写 appCompatibility 数组；
+  // 顶层 MinAppVersion 仍是旧代真实范围（4.x）。
   const compat = manifest.appCompatibility;
+  const epoch = manifest.appEpoch;
+
   if (compat !== undefined) {
     if (!Array.isArray(compat) || compat.length < 1 || compat.length > 2) {
       errs.push('appCompatibility 必须是 1–2 项的数组');
     } else {
       const seen = new Set();
       for (const item of compat) {
-        const epoch = item && item.appEpoch;
-        if (epoch !== 1 && epoch !== 2) errs.push(`appEpoch 只允许 1 或 2，当前 ${epoch}`);
-        if (seen.has(epoch)) errs.push(`appEpoch ${epoch} 重复`);
-        seen.add(epoch);
+        const e = item && item.appEpoch;
+        if (e !== 1 && e !== 2) errs.push(`appEpoch 只允许 1 或 2，当前 ${e}`);
+        if (seen.has(e)) errs.push(`appEpoch ${e} 重复`);
+        seen.add(e);
         if (!item || typeof item.minAppVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(item.minAppVersion)) {
           errs.push('appCompatibility 每项必须有合法 minAppVersion');
         }
@@ -195,6 +200,33 @@ function validateManifest(manifest, version) {
     // 规范：顶层 MinAppVersion 必须保留「旧代」真实范围，不能写成 1.x
     if (manifest.MinAppVersion && !manifest.MinAppVersion.startsWith('4.')) {
       errs.push(`声明 appCompatibility 时，顶层 MinAppVersion 必须保留旧代范围（4.x），当前 ${manifest.MinAppVersion}`);
+    }
+    // 顶层 MaxAppVersion 是旧代上限，写死具体版本会把更新的旧客户端挡在外面。
+    if (manifest.MaxAppVersion !== undefined) {
+      errs.push(
+        '不要写顶层 MaxAppVersion：它是旧代上限，会把 4.1.7+ 等更新客户端挡在外面；'
+        + '需要限制上限请用 appCompatibility 里对应项的 maxAppVersion'
+      );
+    }
+  } else {
+    // 单代简写
+    if (epoch === undefined) {
+      errs.push('单代包必须声明 appEpoch（本包为 1，表示仅旧 4.x 体系）');
+    } else if (epoch !== 1 && epoch !== 2) {
+      errs.push(`appEpoch 只允许 1 或 2（0 视同 1），当前 ${epoch}`);
+    } else if (epoch === 1) {
+      // 旧代必须遵守 4.1.0 / 4.1.2 的最低版本约定
+      const min = String(manifest.MinAppVersion || '');
+      if (!min.startsWith('4.')) {
+        errs.push(`appEpoch=1 时 MinAppVersion 必须是旧代 4.x，当前 ${min}`);
+      } else if (cmpVersion(min, '4.1.2') < 0) {
+        errs.push(`Api 4 插件最低需要 4.1.2，当前 MinAppVersion=${min}`);
+      }
+    } else if (epoch === 2) {
+      const min = String(manifest.MinAppVersion || '');
+      if (!min.startsWith('1.')) {
+        errs.push(`appEpoch=2 时 MinAppVersion 必须是正式代 1.x，当前 ${min}`);
+      }
     }
   }
 

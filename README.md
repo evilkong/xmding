@@ -6,12 +6,12 @@
 |---|---|
 | 插件 ID | `xmding`（显示名「小咪叮」） |
 | 作者 | atroy |
-| 版本 | 1.0.1 |
+| 版本 | 1.0.3 |
 | Api | 4（JavaScript，最小客户端 4.1.2） |
 | Kind | `tool` |
 | Hooks | `tool.run` |
 | 权限 | `system.full` |
-| 兼容 | 旧代 4.1.2+ ／ 正式代 1.0.0+（双兼容） |
+| 兼容 | 旧 4.x 体系 4.1.2+（不支持正式代 1.x） |
 
 ---
 
@@ -25,7 +25,7 @@
 
 | 产物 | 内容 | 用途 |
 |---|---|---|
-| `dist/xmding-1.0.1.zip` | 仅 `plugin.json` + `plugin.js` | **符合规范的安装包**，走「插件市场 → 从本地安装」 |
+| `dist/xmding-1.0.3.zip` | 仅 `plugin.json` + `plugin.js` | **符合规范的安装包**，走「插件市场 → 从本地安装」 |
 | 本 README | 说明文档 | 独立文件，不塞进 ZIP |
 | `build.js` / `verify.js` / `smoke.js` | 构建、校验、回归 | 开发用，不随包分发 |
 
@@ -38,7 +38,7 @@
 ### 方式 A：走鲸鲸插件市场（推荐，符合规范）
 
 1. 鲸鲸 →「插件市场 → 从本地安装」
-2. 选 `dist/xmding-1.0.1.zip`
+2. 选 `dist/xmding-1.0.3.zip`
 3. 在「已安装」卡片点「启用」
 4. **启用后需重启内核**，插件才会响应请求
 
@@ -144,25 +144,40 @@ whale.sendText() → reminders 入队 → 桥接 /api/reminders/due → 零焦�
 
 ---
 
-## 六、双代兼容声明
+## 六、兼容声明（仅旧 4.x 体系）
+
+本包**只兼容旧 4.x 体系**，不支持正式代鲸鲸 1.x：
 
 ```json
 "MinAppVersion": "4.1.2",
-"MaxAppVersion": "4.1.6",
+"appEpoch": 1
+```
+
+单代包用整数 `appEpoch` 简写，不写 `appCompatibility` 数组。规范对 `appEpoch` 的定义：
+
+| 取值 | 含义 |
+|---|---|
+| 缺省 / `0` / `1` | 旧 4.x 体系，仅与本地 `updateEpoch` 为 0/1 的客户端比较 |
+| `2` | 正式版体系，仅与本地 `updateEpoch: 2` 的客户端比较 |
+
+客户端**先比代次、再比范围**，不跨代比较 4.x 与 1.x。未知代次和负值拒绝安装。
+
+### 为什么不写顶层 `MaxAppVersion`
+
+1.0.1 曾写 `"MaxAppVersion": "4.1.6"`，结果把**比 4.1.6 更新的旧代客户端**（如当前的 4.1.7.1）挡在兼容范围外——顶层范围是给已发布旧客户端读的旧代上限，写死具体旧版就等于拒绝所有更新版本。
+
+本包不设上限（最低 4.1.2，向上不限）。确实需要限制某代上限时，用数组项的 `maxAppVersion`：
+
+```json
 "appCompatibility": [
-  { "appEpoch": 1, "minAppVersion": "4.1.2" },
-  { "appEpoch": 2, "minAppVersion": "1.0.0" }
+  { "appEpoch": 1, "minAppVersion": "4.1.2", "maxAppVersion": "4.1.9" }
 ]
 ```
 
-按规范要点：
+`build.js` 与 `verify.js` 会拦截三类写法：`appEpoch=1` 但 `MinAppVersion` 不是 4.x、`MinAppVersion` 低于 4.1.2、以及数组与顶层 `MaxAppVersion` 并存。
 
-- 顶层 `MinAppVersion` / `MaxAppVersion` **保留旧代真实范围**（4.x），不能改成 1.x，供已发布旧客户端读取
-- 新客户端优先读 `appCompatibility` 数组，先比代次再比版本，**不跨代比较 4.x 与 1.x**
-- 数组 1–2 项，`appEpoch` 只允许 1 或 2，同代不可重复
-- 市场条目与包内声明必须一致（含顺序）——本包暂未投稿，投稿时需保持同步
-
-> 功能插件的跨代兼容**不由宿主自动推断**，需作者在两代分别试装。本包的双兼容是按规范声明并已在 4.1.7.1 上验证；正式代 1.x 客户端我这里没有，**未做实机验证**，投稿前请在两代各试装一次。
+> 本包已在旧代 **4.1.7.1** 上实机验证（安装、启用、发送、回执全部通过）。
+> 正式代 1.x 未声明、也未测试——若日后需要支持，改用 `appCompatibility` 数组并补上 `{ "appEpoch": 2, "minAppVersion": "1.0.0" }`，然后在两代分别试装。
 
 ---
 
