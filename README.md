@@ -6,7 +6,7 @@
 |---|---|
 | 插件 ID | `xmding`（显示名「小咪叮」） |
 | 作者 | atroy |
-| 版本 | 1.0.3 |
+| 版本 | 1.0.6 |
 | Api | 4（JavaScript，最小客户端 4.1.2） |
 | Kind | `tool` |
 | Hooks | `tool.run` |
@@ -17,7 +17,7 @@
 
 ## 安装
 
-从「插件市场 → 从本地安装」选择 `dist/xmding-1.0.3.zip`，然后在「已安装」卡片点「启用」。
+从「插件市场 → 从本地安装」选择 `dist/xmding-1.0.6.zip`，然后在「已安装」卡片点「启用」。
 
 **启用后需重启内核**，插件才会响应请求。
 
@@ -48,10 +48,85 @@ node build.js --local
 |---|---|
 | `to` | 群名 / 人名 / 备注 / wxid / `xxx@chatroom`，**必须唯一命中** |
 | `chatId` | 直接给会话 ID，跳过名称匹配（最稳） |
-| `text` | 正文，≤ 4000 字 |
+| `text` | 正文，≤ 4000 字。**三种 delivery 都必填** |
 | `chatType` | `group` / `private`，仅影响搜索范围 |
-| `delivery` | `text`（默认）/ `voice` / `image`（image 需 `file` 绝对路径） |
+| `delivery` | `text`（默认）/ `image` / `voice` |
+| `file` | 仅 `delivery: "image"` 时使用，本机**绝对路径** |
 | `dryRun` | `true` = 只解析目标不发送 |
+
+### 发图片
+
+```json
+{
+  "id": "xmding",
+  "input": {
+    "to": "文件传输助手",
+    "delivery": "image",
+    "file": "C:\\Users\\me\\Pictures\\chart.png",
+    "text": "这是今天的报表"
+  }
+}
+```
+
+四个要点：
+
+1. **`text` 仍然必填**。即使只发图，也要给一段文字，否则返回 `empty_text`。
+2. **`file` 必须是绝对路径**。相对路径会以 `ENOENT` 失败。
+3. **单张 ≤ 4 MB**，支持常见图片格式（png / jpg / gif 等）。
+4. **需要表情包功能开启**（`config.json` 的 `features.stickers: true`）。关闭时会返回 `send_rejected`，原因里带「表情包功能未开启」。
+
+图片走的是**表情包投递通道**，不是文字用的提醒队列，所以：
+
+- 回执终态是 **`confirmed`**（不是文字那边的 `submitted` / `done`）
+- 走桥接的图片发送流程，与文字通道相互独立
+
+> 图片内容会先落进本机表情包库再发出去。这是宿主实现方式，插件无法绕开——介意的话请发文字或改用别的方式传图。
+
+
+### 发语音
+
+```json
+{
+  "id": "xmding",
+  "input": {
+    "to": "文件传输助手",
+    "delivery": "voice",
+    "text": "这段话会被合成为语音发出去"
+  }
+}
+```
+
+`text` 就是语音要说的话，不需要自己准备音频文件——宿主调用 TTS 接口合成，再用微信的录音通道发出去。
+
+前置条件（缺一不可）：
+
+| 条件 | 位置 | 缺失时表现 |
+|---|---|---|
+| 语音总开关 | `data/voice-send.json` 的 `"Enabled": true` | 直接失败，不进合成 |
+| TTS Provider 与 Key | 同上 `Provider` / `Model`，Key 在 `data/voice-send-<provider>.key` | 合成阶段超时或 HTTP 报错 |
+| **微信主窗在前台** | 微信窗口处于激活状态（非最小化、非被遮挡） | `failed 请保持微信目标聊天在前台` |
+| **目标会话在前台** | 微信当前打开的正是要发的那个会话 | 同上 |
+
+后两条是语音通道和文字通道最大的区别：文字走 UIA 后台输入，可以在微信不在前台时静默发送；而**语音必须真实点击录音按钮**，所以要求微信和该会话都处于前台。
+
+### 实测结论
+
+在本机 4.1.7.1 上连续测试 10 次：**成功 2 次，失败 8 次**。历史累计 29 次中成功 16 次。两种失败形态：
+
+| 日志 | 含义 | 触发条件 |
+|---|---|---|
+| `uncertain 找不到元素 (0x80070490)` | 微信窗口不可见/被隐藏，录音控件读不到 | 微信不在前台 |
+| `failed 请保持微信目标聊天在前台` | 会话对了但前台条件不满足 | 前台会话不是目标 |
+
+**关键点**：这两条都是能被前置操作解决的，不是永久失效。成功那两次都是在「微信已前置 + 刚发过一条文字切到目标会话」之后立刻发语音。但只要中间焦点被抢走（比如你切了别的窗口、或桥接自己在处理别的任务），下一条就会失败。
+
+所以**语音不适合无人值守的批量/定时发送**，更适合人在电脑前、微信开着目标会话时手动触发。
+
+⚠️ **回执可能骗人**：语音的 `confirmed` / `sent_unconfirmed` 只代表「已交给语音工作进程并开始录音」，**不等于对方收到了**。
+实测有失败记录在 `reminders.json` 里仍是 `status: done`、`confirmed: true`。所以语音请**以微信里实际有没有收到为准**，不要只看回执。
+
+> 需要稳定送达请优先用文字；文字通道不受窗口焦点影响。
+
 
 ### status · 查回执
 
@@ -100,11 +175,17 @@ curl -s -X POST "http://127.0.0.1:8787/api/plugins/run" \
 |---|---|
 | `queued` / `pending` | 已入队，桥接还没取 |
 | `sending` | 桥接正在发 |
-| `submitted` / `done` | **发出去了**（`confirmed: true`） |
+| `submitted` / `done` | 文字：**发出去了**（`confirmed: true`） |
+| `confirmed` | 图片：**发出去了**（`confirmed: true`） |
 | `unconfirmed` | 未确认，按策略不自动重发 |
 | `failed` / `expired` / `cancelled` | 失败 / 过期 / 取消 |
 
-正常是 `queued → pending → submitted`，几秒到十几秒。
+文字正常是 `queued → pending → submitted`，图片是 `queued → sending → confirmed`，都在几秒到十几秒内。
+
+判断成功请直接看 `confirmed` 字段，它会同时覆盖文字和图片两种终态；只比对 `status` 字符串时注意上面这两组差异。
+
+⚠️ **语音例外**：`voice` 的 `confirmed` 只代表「已交给语音工作进程」，**不代表录音真的发出去了**。
+实测失败的语音仍会返回 `confirmed: true`，请以微信里实际收到为准。
 
 ---
 
@@ -122,6 +203,9 @@ whale.sendText() → reminders 入队 → 桥接 /api/reminders/due → 零焦�
 - **桥接在线**：`/api/status` 里 `gateways[0].bridge.online === true`
 - **微信窗口非最小化**：最小化时零焦点通道返回 `minimized`
 - **插件总开关**：`config.json` 的 `features.javascriptPlugins: true`
+- **发图片额外需要**：`config.json` 的 `features.stickers: true`
+
+文字走「提醒」队列，图片走「表情包」通道，两者独立，所以开关也是分开的。
 
 ---
 

@@ -99,6 +99,17 @@ function isGroupId(id) {
 }
 
 /**
+ * 判断是否本机绝对路径。
+ * 发图片要求绝对路径：宿主的 path.resolve 会把相对路径解析到它自己的 cwd，
+ * 与调用方预期不符，失败时报 ENOENT 很难排查，这里提前拦下。
+ */
+function isAbsolutePath(p) {
+  const v = String(p || '');
+  // Windows 盘符（C:\ 或 C:/）或 UNC 路径（\\server\share）
+  return /^[a-zA-Z]:[\\/]/.test(v) || /^\\\\[^\\]/.test(v) || v.startsWith('/');
+}
+
+/**
  * 判断一个字符串是否「本身就是会话 ID」。
  * 是的话跳过名称匹配，直接按 ID 发送——既快，也避免同名误判。
  */
@@ -283,7 +294,9 @@ async function doSend(input) {
   const rawText = pick(input.text, input.message);
   const text = cleanText(rawText);
 
-  if (!text) return fail('empty_text', 'text 不能为空');
+  // text 对三种 delivery 都是必填：图片/语音也要带一段文字。
+  // 宿主 pluginHost.send 对 image 之外的路径同样要求非空 text。
+  if (!text) return fail('empty_text', 'text 不能为空（发图片/语音也需要给一段文字）');
   if (String(rawText).length > MAX_TEXT) {
     return fail('text_too_long', '正文超过 ' + MAX_TEXT + ' 字，请拆成几条发');
   }
@@ -318,8 +331,15 @@ async function doSend(input) {
   let out;
   try {
     if (delivery === 'image') {
+      // 图片走宿主的表情包通道（与文字的提醒队列不同）：
+      //   1) file 必须是本机绝对路径，相对路径会 ENOENT
+      //   2) 单张 ≤ 4 MB
+      //   3) 需要 features.stickers = true，否则宿主抛「表情包功能未开启」
       const file = str(input.file, 400);
       if (!file) return fail('missing_file', '发图片需要 file（本机绝对路径）');
+      if (!isAbsolutePath(file)) {
+        return fail('invalid_file', 'file 必须是本机绝对路径，收到的是相对路径：' + file);
+      }
       out = await whale.sendImage(target.chatId, file, opts);
     } else if (delivery === 'voice') {
       out = await whale.sendVoice(target.chatId, text, opts);
@@ -348,7 +368,15 @@ async function doSend(input) {
     name: target.name,
     matchedBy: target.matchedBy,
     textLength: text.length,
-    note: '已入队（queued ≠ 已送达）。请用 {action:"status", id:"' + (id || '<id>') + '"} 查回执，直到 status 为 submitted / done。',
+    // 文字终态是 submitted/done，图片走表情包通道终态是 confirmed。
+    // 语音需要微信与目标会话都在前台，且回执只到「开始录音」，提示里单独说明。
+    note: delivery === 'voice'
+      ? '已入队。语音要求微信主窗与目标会话都在前台（否则会报「请保持微信目标聊天在前台」）；'
+        + '其 confirmed 只代表「已交给语音工作进程并开始录音」，不等于对方收到，请以微信实际收到为准。'
+      : '已入队（queued ≠ 已送达）。请用 {action:"status", id:"' + (id || '<id>') + '"} 查回执，'
+        + (delivery === 'image'
+          ? '直到 status 为 confirmed。'
+          : '直到 status 为 submitted / done。'),
   };
 }
 
@@ -413,7 +441,7 @@ function doPing() {
     name: '小咪叮',
     author: 'atroy',
     api: 4,
-    version: '1.0.3',
+    version: '1.0.6',
     now: Date.now(),
   };
 }
