@@ -239,11 +239,32 @@ node build.js             # 生成 dist/xmding-<version>.zip + 校验信息
 node build.js --local     # 额外部署到本机，便于回归
 node verify.js            # 独立校验包结构 / 清单 / 兼容声明 / 源码
 node smoke.js             # 功能回归（对运行中的内核发真实请求）
+node publish.js           # 构建 → 校验 → 提交 → 推送（一条命令发版）
 ```
 
 `build.js` 与 `verify.js` 的 ZIP 解析是两套独立实现，避免「自己写错自己验过」。构建固定时间戳，同输入产生相同字节，便于核对 SHA-256。
 
-安装包根目录只含 `plugin.json` 和 `plugin.js` 两个文件（上限 16 MiB，代码 8 MiB，UTF-8、CommonJS）。
+安装包根目录只含 `plugin.json` 和 `plugin.js` 两个文件（上限 16 MiB，代码 8 MiB、UTF-8、CommonJS）。
+
+### 发布
+
+```bash
+node publish.js                  # 自动生成提交信息并推送到 origin
+node publish.js -m "fix: xxx"    # 指定提交信息
+node publish.js --dry-run        # 只构建+校验+预览，不提交不推送
+node publish.js --no-push        # 只提交到本地
+```
+
+发布脚本会依次执行并**任一步失败即中止**：
+
+1. 构建安装包
+2. 校验包（不通过不会产生提交）
+3. 扫描敏感信息（token / API Key / 内网地址，命中即中止）
+4. 提交（无实际变更时自动跳过，不产生空提交）
+5. `fetch` + 必要时 `rebase`，避免 non-fast-forward
+6. 推送 `HEAD:main`
+
+本机已配置好系统凭据，推送全程非交互。
 
 ---
 
