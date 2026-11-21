@@ -5,10 +5,49 @@
  * 只调用只读/预检接口，不会真的往微信发消息。
  */
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 
-const TOKEN = 'REDACTED_XMDING_TOKEN';
-const HOST = '127.0.0.1';
-const PORT = 8787;
+/**
+ * Token 不写死在源码里（避免随仓库外泄）。
+ * 读取优先级：环境变量 XMDING_TOKEN → 参数 --token=xxx → WhaleGirl 的 config.json。
+ */
+function resolveToken() {
+  const fromEnv = process.env.XMDING_TOKEN;
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+
+  const arg = process.argv.find((a) => a.startsWith('--token='));
+  if (arg) return arg.slice('--token='.length).trim();
+
+  // 从本机 WhaleGirl 配置里读 gateway.wechat.inboundToken
+  const candidates = [
+    process.env.WHALE_ROOT,
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'WhaleGirl'),
+    'C:\\Program Files\\WhaleGirl',
+  ].filter(Boolean);
+  for (const root of candidates) {
+    try {
+      const cfg = JSON.parse(
+        fs.readFileSync(path.join(root, 'config.json'), 'utf8').replace(/^\uFEFF/, '')
+      );
+      const token = cfg?.gateway?.wechat?.inboundToken;
+      if (token && String(token).trim()) return String(token).trim();
+    } catch { /* 试下一个 */ }
+  }
+  return '';
+}
+
+const TOKEN = resolveToken();
+const HOST = process.env.WHALE_HOST || '127.0.0.1';
+const PORT = Number(process.env.WHALE_PORT) || 8787;
+
+if (!TOKEN) {
+  console.error('\n缺少 token。请用以下任一方式提供：');
+  console.error('  set XMDING_TOKEN=<token>        (或 $env:XMDING_TOKEN="<token>")');
+  console.error('  node smoke.js --token=<token>');
+  console.error('  把 WhaleGirl 的 config.json 放到默认位置，脚本会自动读取\n');
+  process.exit(2);
+}
 
 function post(payload) {
   return new Promise((resolve, reject) => {

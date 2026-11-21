@@ -324,7 +324,8 @@ function main() {
     bytes: zip.length,
     sha256: sha,
     files: SRC_FILES,
-    builtAt: new Date().toISOString(),
+    // 不写构建时间：否则每次构建这个文件都变，git diff 全是噪音，
+    // 也破坏了「同输入 → 同产物」的可复现性。发版时间交给 git commit 记录。
   };
   fs.writeFileSync(path.join(DIST, `${manifest.Id}-${version}.json`),
     JSON.stringify(meta, null, 2) + '\n', 'utf8');
