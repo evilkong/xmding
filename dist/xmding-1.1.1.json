@@ -16,8 +16,8 @@
   ],
   "minAppVersion": "4.1.2",
   "file": "xmding-1.1.1.zip",
-  "bytes": 11619,
-  "sha256": "20b9f21d52480dfd6eb8ad8ddf3a568f51c0046c86f7d698be750a2ffaa98203",
+  "bytes": 12292,
+  "sha256": "5387b5af4ddf3842e0788b71633f19b4e7771d423ea071270298d72829ded7fd",
   "files": [
     "plugin.json",
     "plugin.js"

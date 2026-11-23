@@ -101,6 +101,30 @@ let relayServer = null;
 let relayBind = null;
 /** token 缓存：{ value, at }。 */
 let tokenCache = null;
+/**
+ * 插件配置项缓存（来自宿主注入的 ctx.settings，即 flow-grant.json 的 settings）。
+ * 只在 hook 调用上下文里能读到（whale.context 依赖 AsyncLocalStorage），
+ * 因此在各入口捕获到模块变量，供 HTTP 回调（无 invocation 上下文）使用。
+ * 优先级：ctx.settings > relay.config.json > 默认值。
+ */
+let relayCfgFromSettings = null;
+
+/**
+ * 从 hook 上下文捕获插件配置（port/bind）。
+ * 宿主把 flow-grant.json 的 settings 经 javascriptPlugins.js 注入为 ctx.settings。
+ */
+function captureSettings(ctx) {
+  let s = ctx && ctx.settings;
+  if (!s && whale.context) s = whale.context.settings;
+  if (!s || typeof s !== 'object') return;
+  // grant.json 手工编辑时 port 可能写成字符串，统一转成整数再校验。
+  let port = s.port;
+  if (typeof port === 'string' && /^\d+$/.test(port.trim())) port = parseInt(port.trim(), 10);
+  relayCfgFromSettings = {
+    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : null,
+    bind: typeof s.bind === 'string' && s.bind.trim() ? s.bind.trim() : null,
+  };
+}
 
 /** 回执状态 → 中文说明。 */
 const STATUS_NOTES = Object.freeze({
@@ -541,7 +565,13 @@ function hostToken() {
   return t;
 }
 
-/** 读/初始化转发器配置（写在 pluginData，不进安装包）。 */
+/**
+ * 读转发器配置。优先级：
+ *   1) 插件配置项（flow-grant.json 的 settings，经 ctx.settings 注入）——主配置源
+ *   2) relay.config.json（pluginData 里的旧文件）——兜底/兼容手工编辑
+ *   3) 默认值（8790 / 0.0.0.0）
+ * 配置文件已不作为主配置入口，仅在 settings 缺失时兜底。
+ */
 function relayConfig() {
   let cfg = {};
   try {
@@ -549,13 +579,18 @@ function relayConfig() {
     const file = path.join(dir, RELAY_CONFIG_FILE);
     if (fs.existsSync(file)) {
       cfg = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
-    } else {
-      cfg = { port: RELAY_DEFAULTS.port, bind: RELAY_DEFAULTS.bind };
-      try { fs.writeFileSync(file, JSON.stringify(cfg, null, 2), 'utf8'); } catch { /* 只读环境忽略 */ }
     }
   } catch { cfg = {}; }
-  const port = Number.isInteger(cfg.port) && cfg.port > 0 && cfg.port < 65536 ? cfg.port : RELAY_DEFAULTS.port;
-  const bind = typeof cfg.bind === 'string' && cfg.bind ? cfg.bind : RELAY_DEFAULTS.bind;
+
+  const s = relayCfgFromSettings || {};
+  let filePort = cfg.port;
+  if (typeof filePort === 'string' && /^\d+$/.test(filePort.trim())) filePort = parseInt(filePort.trim(), 10);
+  const port = (Number.isInteger(s.port) && s.port)
+    ? s.port
+    : (Number.isInteger(filePort) && filePort > 0 && filePort < 65536 ? filePort : RELAY_DEFAULTS.port);
+  const bind = s.bind
+    ? s.bind
+    : (typeof cfg.bind === 'string' && cfg.bind ? cfg.bind : RELAY_DEFAULTS.bind);
   return { port, bind };
 }
 
@@ -685,21 +720,24 @@ function ensureRelay() {
 }
 
 /** app.start：启动监听并快速返回（不能占用执行槽）。 */
-function onAppStart() {
+function onAppStart(ctx) {
+  captureSettings(ctx);
   return ensureRelay().then(function (r) {
     return { ok: true, action: 'app.start', relay: r, note: '独立监听转发已启动（若失败会由 timer.tick 重试）' };
   });
 }
 
 /** app.stop：关闭监听。 */
-function onAppStop() {
+function onAppStop(ctx) {
+  captureSettings(ctx);
   return stopRelay().then(function (r) {
     return { ok: true, action: 'app.stop', relay: r };
   });
 }
 
-/** timer.tick：保活自检。 */
-function onTimerTick() {
+/** timer.tick：保活自检（顺带刷新配置，端口/bind 变了就重建监听）。 */
+function onTimerTick(ctx) {
+  captureSettings(ctx);
   return ensureRelay().then(function (r) {
     return { ok: true, action: 'timer.tick', relay: r };
   });
@@ -718,6 +756,10 @@ async function run(ctx) {
   const action = String(input.action || 'send').trim().toLowerCase();
 
   try {
+    // 每次调用都刷新插件配置缓存：改了 flow-grant.json 的 settings 后，
+    // 下一次 ping / timer.tick 就能读到新值（timer 每 30s 自动触发）。
+    captureSettings(ctx);
+
     // 生命周期钩子（由宿主在启动/停止/定时时以 hook 名作为 action 调用）。
     if (action === 'app.start') return await onAppStart();
     if (action === 'app.stop') return await onAppStop();

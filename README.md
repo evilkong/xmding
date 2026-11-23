@@ -53,17 +53,24 @@ node build.js --local
 
 ### 配置
 
-配置文件在 `<WhaleGirl>/data/plugins/xmding.data/relay.config.json`，**首次启动自动生成**（不进安装包，也不进 git）：
+转发器的端口与绑定地址来自**插件配置项**，在 `<WhaleGirl>/data/plugins/xmding.flow-grant.json` 的 `settings` 字段里配置（与 `xmding.flow-settings.json` 保持一致即可）：
 
 ```json
-{ "port": 8790, "bind": "0.0.0.0" }
+{
+  "enabled": true,
+  "fullAccess": true,
+  "hash": "...",
+  "settings": { "port": 8790, "bind": "0.0.0.0" }
+}
 ```
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `port` | `8790` | 监听端口，可改 |
-| `bind` | `0.0.0.0` | 绑定地址，默认全网卡（局域网可达） |
+| `settings.port` | `8790` | 监听端口，可改 |
+| `settings.bind` | `0.0.0.0` | 绑定地址，默认全网卡（局域网可达） |
 
+- **主配置源是 `flow-grant.json` 的 `settings`**；内核把它注入给插件（`whale.context.settings`）。旧文件 `<pluginData>/relay.config.json` 仅在 settings 缺失时兜底，不作为主入口。
+- **生效时机**：改完 `settings` 后，`timer.tick` 每 30 秒自动刷新一次；想立即生效就调一次 `action=ping`（走 `tool.run` 会马上重读配置）。端口/bind 变化会自动关旧端口、绑新端口。
 - 转发目标**自适应**：读 `<appRoot>/config.json` 的 `server.port` 拼 `http://127.0.0.1:<port>/api/plugins/run`，宿主改端口后自动跟随（token 缓存 60s 内刷新）。
 - 鉴权：监听器自带 `x-bot-token` 校验，用宿主 `gateway.wechat.inboundToken` 那把 token；不匹配返回 401，**不会转发**。
 
