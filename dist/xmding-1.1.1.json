@@ -1,0 +1,25 @@
+{
+  "id": "xmding",
+  "name": "小咪叮",
+  "author": "atroy",
+  "version": "1.1.1",
+  "api": 4,
+  "kind": "tool",
+  "hooks": [
+    "tool.run",
+    "app.start",
+    "app.stop",
+    "timer.tick"
+  ],
+  "permissions": [
+    "system.full"
+  ],
+  "minAppVersion": "4.1.2",
+  "file": "xmding-1.1.1.zip",
+  "bytes": 11619,
+  "sha256": "20b9f21d52480dfd6eb8ad8ddf3a568f51c0046c86f7d698be750a2ffaa98203",
+  "files": [
+    "plugin.json",
+    "plugin.js"
+  ]
+}

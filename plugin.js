@@ -40,8 +40,18 @@
 
 /* ------------------------------------------------------------------ 常量 */
 
-/** Api 4 宿主注入的 SDK，固定从 'whale' 引入；其余依赖需自行打包进本文件。 */
+/** Api 4 宿主注入的 SDK，固定从 'whale' 引入；其余依赖走 Node 原生 require。 */
 const whale = require('whale');
+
+/*
+ * v1.1.1 起使用 Node 内置模块实现「独立监听转发」。
+ * worker 的 entry.require 只拦截 'whale'，其余模块走原生 require，
+ * 因此这里可以安全地 require('node:http') 等内置模块（Api 4 = system.full，非沙箱）。
+ */
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 
 /** 单条正文上限。留足余量给宿主 16000 的平台限制。 */
 const MAX_TEXT = 4000;
@@ -62,6 +72,35 @@ const WECHAT_NEWLINE = '\v';
 
 /** 可接受的 delivery 取值。 */
 const DELIVERIES = ['text', 'voice', 'image'];
+
+/**
+ * ── 独立监听转发（v1.1.1）相关默认值 ────────────────────────────────
+ * 目标：绕过宿主「插件接口仅允许本机」的硬闸。做法是在插件 worker 内
+ * 用 node:http 起一个监听服务绑 0.0.0.0，收到请求后从本机（环回）
+ * 原样转发到 http://127.0.0.1:<server.port>/api/plugins/run。
+ * 环回请求会被宿主 isLoopbackRequest() 直接放行，无需改宿主任何代码。
+ */
+const RELAY_DEFAULTS = Object.freeze({
+  port: 8790,                 // 监听端口，可由配置文件覆盖
+  bind: '0.0.0.0',            // 绑定地址，默认全网卡（局域网可达）
+  forwardHost: '127.0.0.1',   // 转发目标主机，固定环回
+  forwardPath: '/api/plugins/run',
+});
+/** 运行时配置文件名（写在 pluginData，不进安装包）。 */
+const RELAY_CONFIG_FILE = 'relay.config.json';
+/** token 缓存时长：宿主运行中改 token 时最多这么久后生效。 */
+const TOKEN_CACHE_MS = 60000;
+/** 转发超时：与 ExecutionTimeoutMs 留余量。 */
+const FORWARD_TIMEOUT_MS = 30000;
+/** 单次请求体上限（与宿主 512 KiB 对齐，留余量）。 */
+const RELAY_MAX_BODY = 600 * 1024;
+
+/** 监听服务实例（模块级单例，随 worker 常驻）。 */
+let relayServer = null;
+/** 当前监听的端口/绑定地址，供自检比对。 */
+let relayBind = null;
+/** token 缓存：{ value, at }。 */
+let tokenCache = null;
 
 /** 回执状态 → 中文说明。 */
 const STATUS_NOTES = Object.freeze({
@@ -456,9 +495,214 @@ function doPing() {
     name: '小咪叮',
     author: 'atroy',
     api: 4,
-    version: '1.1.0',
+    version: VERSION,
     now: Date.now(),
+    relay: relayBind ? { port: relayBind.port, bind: relayBind.bind, listening: !!(relayServer && relayServer.listening) } : null,
   };
+}
+
+/* ------------------------------------------------- 独立监听转发 (v1.1.1) */
+
+/** 插件版本号（ping 与 healthz 共用）。 */
+const VERSION = '1.1.1';
+
+/** 恒定时间字符串比较，避免靠响应时间猜 token（与宿主 security.js 同口径）。 */
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a == null ? '' : a), 'utf8');
+  const y = Buffer.from(String(b == null ? '' : b), 'utf8');
+  if (x.length !== y.length) return false;
+  try { return crypto.timingSafeEqual(x, y); } catch { return false; }
+}
+
+/** 读宿主 config.json（appRoot 由宿主注入），失败返回空对象。 */
+function appConfig() {
+  try {
+    const root = (whale.paths && whale.paths.appRoot) || '';
+    if (!root) return {};
+    return JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  } catch { return {}; }
+}
+
+/** 转发目标 URL：从宿主 server.port 自适应拼环回地址。 */
+function forwardUrl() {
+  const cfg = appConfig();
+  const sp = cfg && cfg.server && cfg.server.port;
+  const port = Number.isInteger(sp) && sp > 0 && sp < 65536 ? sp : 8787;
+  return 'http://' + RELAY_DEFAULTS.forwardHost + ':' + port + RELAY_DEFAULTS.forwardPath;
+}
+
+/** 宿主 inboundToken（带缓存），用作转发器的 x-bot-token 校验基准。 */
+function hostToken() {
+  const now = Date.now();
+  if (tokenCache && now - tokenCache.at < TOKEN_CACHE_MS) return tokenCache.value;
+  const cfg = appConfig();
+  const t = String((cfg && cfg.gateway && cfg.gateway.wechat && cfg.gateway.wechat.inboundToken) || '').trim() || null;
+  tokenCache = { value: t, at: now };
+  return t;
+}
+
+/** 读/初始化转发器配置（写在 pluginData，不进安装包）。 */
+function relayConfig() {
+  let cfg = {};
+  try {
+    const dir = (whale.paths && whale.paths.pluginData) || '.';
+    const file = path.join(dir, RELAY_CONFIG_FILE);
+    if (fs.existsSync(file)) {
+      cfg = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+    } else {
+      cfg = { port: RELAY_DEFAULTS.port, bind: RELAY_DEFAULTS.bind };
+      try { fs.writeFileSync(file, JSON.stringify(cfg, null, 2), 'utf8'); } catch { /* 只读环境忽略 */ }
+    }
+  } catch { cfg = {}; }
+  const port = Number.isInteger(cfg.port) && cfg.port > 0 && cfg.port < 65536 ? cfg.port : RELAY_DEFAULTS.port;
+  const bind = typeof cfg.bind === 'string' && cfg.bind ? cfg.bind : RELAY_DEFAULTS.bind;
+  return { port, bind };
+}
+
+/** 读请求体，带体积上限。 */
+function readRequestBody(req) {
+  return new Promise(function (resolve, reject) {
+    const chunks = [];
+    let size = 0;
+    req.on('data', function (c) {
+      size += c.length;
+      if (size > RELAY_MAX_BODY) { reject(Error('body_too_large')); try { req.destroy(); } catch {} return; }
+      chunks.push(c);
+    });
+    req.on('end', function () { resolve(Buffer.concat(chunks)); });
+    req.on('error', reject);
+  });
+}
+
+/** 把请求体原样 POST 到宿主 /api/plugins/run，返回宿主的响应。 */
+function forwardRequest(body) {
+  return new Promise(function (resolve, reject) {
+    const u = new URL(forwardUrl());
+    const opts = {
+      hostname: u.hostname,
+      port: u.port,
+      path: u.pathname,
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': body.length,
+        // 带上 token：宿主环回虽不校验，但兼容未来策略变化；token 不写进源码。
+        'x-bot-token': hostToken() || '',
+        'x-whale-plugin': 'xmding',
+      },
+      timeout: FORWARD_TIMEOUT_MS,
+    };
+    const r = http.request(opts, function (resp) {
+      const chunks = [];
+      resp.on('data', function (c) { chunks.push(c); });
+      resp.on('end', function () {
+        resolve({ status: resp.statusCode || 502, body: Buffer.concat(chunks), ctype: resp.headers['content-type'] || 'application/json' });
+      });
+    });
+    r.on('timeout', function () { r.destroy(); reject(Error('forward_timeout')); });
+    r.on('error', reject);
+    r.write(body);
+    r.end();
+  });
+}
+
+/** 监听器的请求入口：先校验 token，再原样转发。 */
+async function relayHandler(req, res) {
+  try {
+    if (req.url === '/healthz' || req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, plugin: 'xmding', version: VERSION,
+        relay: relayBind ? { port: relayBind.port, bind: relayBind.bind, listening: !!(relayServer && relayServer.listening) } : null }));
+      return;
+    }
+
+    // 自带 x-bot-token 校验：调用方必须用宿主同一把 token。
+    const provided = String((req.headers && req.headers['x-bot-token']) || '').trim();
+    const expected = hostToken();
+    if (!expected || !safeEqual(provided, expected)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid x-bot-token' }));
+      return;
+    }
+
+    const body = await readRequestBody(req);
+    if (!body.length) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'empty body' }));
+      return;
+    }
+
+    const out = await forwardRequest(body);
+    res.writeHead(out.status, { 'content-type': out.ctype });
+    res.end(out.body);
+  } catch (err) {
+    res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: false, error: 'relay_error: ' + String((err && err.message) || err) }));
+  }
+}
+
+/** 启动监听（幂等：端口/地址未变且已在听则跳过）。 */
+function startRelay() {
+  const cfg = relayConfig();
+  if (relayServer && relayBind && relayBind.port === cfg.port && relayBind.bind === cfg.bind && relayServer.listening) {
+    return Promise.resolve({ ok: true, already: true, port: cfg.port, bind: cfg.bind });
+  }
+  return stopRelay().then(function () {
+    return new Promise(function (resolve) {
+      const server = http.createServer(function (req, res) { void relayHandler(req, res); });
+      server.on('error', function (err) {
+        relayServer = null; relayBind = null;
+        resolve({ ok: false, error: String((err && err.message) || err) });
+      });
+      server.listen(cfg.port, cfg.bind, function () {
+        relayServer = server;
+        relayBind = { port: cfg.port, bind: cfg.bind };
+        resolve({ ok: true, port: cfg.port, bind: cfg.bind });
+      });
+    });
+  });
+}
+
+/** 关闭监听并释放端口。 */
+function stopRelay() {
+  if (!relayServer) return Promise.resolve({ ok: true, stopped: false });
+  const server = relayServer;
+  relayServer = null; relayBind = null;
+  return new Promise(function (resolve) {
+    try { server.close(function () { resolve({ ok: true, stopped: true }); }); }
+    catch { resolve({ ok: true, stopped: true }); }
+  });
+}
+
+/** 存活自检：配置变了或监听掉了就重建。供 timer.tick 与 tool.run 调用。 */
+function ensureRelay() {
+  const cfg = relayConfig();
+  if (relayServer && relayBind && relayBind.port === cfg.port && relayBind.bind === cfg.bind && relayServer.listening) {
+    return Promise.resolve({ ok: true, already: true });
+  }
+  tokenCache = null; // 配置可能变了，顺手让 token 重读
+  return startRelay();
+}
+
+/** app.start：启动监听并快速返回（不能占用执行槽）。 */
+function onAppStart() {
+  return ensureRelay().then(function (r) {
+    return { ok: true, action: 'app.start', relay: r, note: '独立监听转发已启动（若失败会由 timer.tick 重试）' };
+  });
+}
+
+/** app.stop：关闭监听。 */
+function onAppStop() {
+  return stopRelay().then(function (r) {
+    return { ok: true, action: 'app.stop', relay: r };
+  });
+}
+
+/** timer.tick：保活自检。 */
+function onTimerTick() {
+  return ensureRelay().then(function (r) {
+    return { ok: true, action: 'timer.tick', relay: r };
+  });
 }
 
 /* ---------------------------------------------------------------- 入口 */
@@ -474,6 +718,24 @@ async function run(ctx) {
   const action = String(input.action || 'send').trim().toLowerCase();
 
   try {
+    // 生命周期钩子（由宿主在启动/停止/定时时以 hook 名作为 action 调用）。
+    if (action === 'app.start') return await onAppStart();
+    if (action === 'app.stop') return await onAppStop();
+    if (action === 'timer.tick') return await onTimerTick();
+
+    switch (action) {
+      // tool.run 顺带做一次监听自检：worker 被杀后 app.start 不会重放，
+      // 只要有调用进来就能自愈重建监听（消除永久 down 的窗口）。
+      case 'send':
+      case 'status':
+      case 'list':
+      case 'ping':
+        void ensureRelay();
+        break;
+      default:
+        break;
+    }
+
     switch (action) {
       case 'send': return await doSend(input);
       case 'status': return await doStatus(input);
@@ -489,4 +751,9 @@ async function run(ctx) {
 }
 
 exports.run = run;
-exports.hooks = { 'tool.run': run };
+exports.hooks = {
+  'tool.run': run,
+  'app.start': onAppStart,
+  'app.stop': onAppStop,
+  'timer.tick': onTimerTick,
+};

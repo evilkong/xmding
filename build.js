@@ -367,6 +367,8 @@ function deployToLocal(manifest, source) {
     hooks: manifest.Hooks,
     permissions: manifest.Permissions,
     executionTimeoutMs: manifest.ExecutionTimeoutMs || 30000,
+    // timer.tick 保活周期（秒）：插件靠它自检并重建独立监听转发器。
+    intervalSeconds: 30,
     settings: {},
     javascript: source,
   };

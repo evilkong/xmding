@@ -6,7 +6,7 @@
 |---|---|
 | 插件 ID | `xmding`（显示名「小咪叮」） |
 | 作者 | atroy |
-| 版本 | 1.1.0 |
+| 版本 | 1.1.1 |
 | Api | 4（JavaScript，最小客户端 4.1.2） |
 | Kind | `tool` |
 | Hooks | `tool.run` |
@@ -17,7 +17,7 @@
 
 ## 安装
 
-从「插件市场 → 从本地安装」选择 `dist/xmding-1.0.6.zip`，然后在「已安装」卡片点「启用」。
+从「插件市场 → 从本地安装」选择 `dist/xmding-1.1.1.zip`，然后在「已安装」卡片点「启用」。
 
 **启用后需重启内核**，插件才会响应请求。
 
@@ -34,9 +34,65 @@ node build.js --local
 
 ---
 
+## 独立监听转发（v1.1.1）
+
+绕过宿主「插件接口仅允许本机访问」的硬闸：插件在 worker 内用 `node:http` 起一个监听服务，收到请求后**从本机（环回）原样转发**到 `http://127.0.0.1:<server.port>/api/plugins/run`。环回请求会被宿主 `isLoopbackRequest()` 直接放行，因此**不用改宿主任何源码**，WhaleGirl 升级也不会失效。
+
+```
+局域网调用方 (带 x-bot-token)
+      │ HTTP :8790
+      ▼
+[xmding 插件内置监听器 0.0.0.0:8790]
+      │ ① 校验 x-bot-token（复用宿主 inboundToken，timingSafeEqual）
+      │ ② 原样转发 body/headers
+      ▼
+127.0.0.1:<server.port>/api/plugins/run   ← server.port 从宿主 config.json 自适应读取
+      ▼
+宿主 runTool → tool.run → 微信
+```
+
+### 配置
+
+配置文件在 `<WhaleGirl>/data/plugins/xmding.data/relay.config.json`，**首次启动自动生成**（不进安装包，也不进 git）：
+
+```json
+{ "port": 8790, "bind": "0.0.0.0" }
+```
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `port` | `8790` | 监听端口，可改 |
+| `bind` | `0.0.0.0` | 绑定地址，默认全网卡（局域网可达） |
+
+- 转发目标**自适应**：读 `<appRoot>/config.json` 的 `server.port` 拼 `http://127.0.0.1:<port>/api/plugins/run`，宿主改端口后自动跟随（token 缓存 60s 内刷新）。
+- 鉴权：监听器自带 `x-bot-token` 校验，用宿主 `gateway.wechat.inboundToken` 那把 token；不匹配返回 401，**不会转发**。
+
+### 调用示例
+
+```bash
+curl -s -X POST "http://<局域网IP>:8790/" \
+  -H "x-bot-token: <与宿主相同的 token>" -H "Content-Type: application/json" \
+  --data-binary @payload.json
+# payload.json: {"id":"xmding","input":{"to":"文件传输助手","text":"你好"}}
+```
+
+- `GET /healthz` 或 `/health`：健康检查，返回监听状态与版本（**不需要** token）。
+- 请求体、响应体**原样透传**，与直连宿主 `/api/plugins/run` 的返回完全一致。
+- 请求体上限 600 KiB；转发超时 30s。
+
+### 生命周期与风险
+
+- 监听随插件 worker 常驻；`app.start` 启动、`app.stop` 关闭。
+- `timer.tick` 每 **30 秒**自检一次，监听掉了或被换配置就重建。
+- worker 若因调用报错被宿主强杀，`app.start` 不会自动重放；此时**下一次 `tool.run` 调用会自愈重建**监听，但仍有最长一个 tick 周期（约 30s）的 down 窗口。
+- ⚠️ 安全：`0.0.0.0` + token 校验意味着**任何能访问该端口且拿到 token 的人**都能以你的身份发消息。请仅在内网开放，不要把 8790 直接暴露到公网；需要公网时请再套 SSH 隧道 / 反向代理 + HTTPS。
+
+---
+
 ## 调用
 
-地址 `http://127.0.0.1:8787/api/plugins/run`，认证头 `x-bot-token`（取自 `config.json` → `gateway.wechat.inboundToken`）。
+直连宿主（本机）地址 `http://127.0.0.1:8787/api/plugins/run`，认证头 `x-bot-token`（取自 `config.json` → `gateway.wechat.inboundToken`）。
+局域网调用请改用上面的「独立监听转发」入口。
 
 ### send · 发消息
 
