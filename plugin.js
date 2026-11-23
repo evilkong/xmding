@@ -52,6 +52,14 @@ const MAX_CANDIDATES = 8;
 /** 会话 ID 长度上限。 */
 const MAX_ID = 120;
 
+/**
+ * 微信多行换行 workaround（实测有效，见 README「多行文本」）：
+ * 宿主 bg_sender 会把 \n 压成空格，但 VT(U+000B) / FF(U+000C) 能穿透且被微信渲染成换行。
+ * 本插件统一用 VT 替换正文里的内部换行；首尾换行已被 cleanText 的 trim 去掉，不受影响。
+ * 注意：只用于 text 投递；voice 的 text 是 TTS 朗读内容，不做替换。
+ */
+const WECHAT_NEWLINE = '\v';
+
 /** 可接受的 delivery 取值。 */
 const DELIVERIES = ['text', 'voice', 'image'];
 
@@ -328,6 +336,13 @@ async function doSend(input) {
 
   const opts = { chatType: target.chatType, name: target.name };
 
+  // 多行换行 workaround：宿主 bg_sender 会把 \n 压成空格，导致微信里多行变一行。
+  // 实测 VT(U+000B) 能穿透宿主且被微信渲染成换行，故 text 投递默认把内部 \n 换成 \v。
+  // keepNewline=true 时不替换（保留原样）；voice 的 text 是 TTS 朗读内容，永不替换。
+  const outText = (delivery === 'text' && input.keepNewline !== true)
+    ? text.replace(/\n/g, WECHAT_NEWLINE)
+    : text;
+
   let out;
   try {
     if (delivery === 'image') {
@@ -344,7 +359,7 @@ async function doSend(input) {
     } else if (delivery === 'voice') {
       out = await whale.sendVoice(target.chatId, text, opts);
     } else {
-      out = await whale.sendText(target.chatId, text, opts);
+      out = await whale.sendText(target.chatId, outText, opts);
     }
   } catch (err) {
     return fail('send_rejected', '内核拒绝了这次发送：' + str(err && err.message, 200));
@@ -441,7 +456,7 @@ function doPing() {
     name: '小咪叮',
     author: 'atroy',
     api: 4,
-    version: '1.0.6',
+    version: '1.1.0',
     now: Date.now(),
   };
 }
